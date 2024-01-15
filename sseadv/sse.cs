@@ -1,5 +1,6 @@
 ﻿using AssetsTools.NET;
 using AssetsTools.NET.Extra;
+using AssetsTools.NET.Texture;
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -35,6 +36,7 @@ namespace sseadv
         private bool playingAnimation;
         private int activeFrame;
         private Timer animationTimer;
+        private Dictionary<string, MonoCecilTempGenerator> monoGenerators = new Dictionary<string, MonoCecilTempGenerator>();
 
         private bool onMono;
 
@@ -49,7 +51,9 @@ namespace sseadv
 
             am = new AssetsManager();
             am.LoadClassPackage("classdata.tpk");
-            am.useTemplateFieldCache = true;
+            //am.useTemplateFieldCache = true;
+            //am.MonoTempGenerator = new MonoCecilTempGenerator();
+            am.UseMonoTemplateFieldCache = true;
         }
 
         private void aboutToolStripMenuItem_Click(object sender, EventArgs e)
@@ -66,6 +70,8 @@ namespace sseadv
 
             if (string.IsNullOrEmpty(gameDataPath))
                 return;
+            
+            UpdateMonoGenerator(gameDataPath);
 
             string selectedFile = PickSceneFile(gameDataPath);
 
@@ -148,8 +154,8 @@ namespace sseadv
             Text = TITLE_DEF + " [loading " + Path.GetFileName(fileName) + "...]";
 
             AssetsFileInstance inst = am.LoadAssetsFile(fileName, true);
-            am.LoadClassDatabaseFromPackage(inst.file.typeTree.unityVersion);
-            UpdateDependency(am, inst);
+            am.LoadClassDatabaseFromPackage(inst.file.Metadata.UnityVersion);
+            //UpdateDependency(am, inst);
 
             if (bitmapCache != null)
             {
@@ -174,7 +180,7 @@ namespace sseadv
             Text = TITLE_DEF;
         }
 
-        private void UpdateDependency(AssetsManager am, AssetsFileInstance ofFile)
+        /*private void UpdateDependency(AssetsManager am, AssetsFileInstance ofFile)
         {
             for (int i = 0; i < ofFile.dependencies.Count; i++)
             {
@@ -195,7 +201,7 @@ namespace sseadv
         {
             string matchName = Path.GetFileName(dep.assetPath.ToLower());
             return am.files.FirstOrDefault(f => matchName == Path.GetFileName(f.path.ToLower()));
-        }
+        }*/
 
         private bool CheckPathInfo()
         {
@@ -261,15 +267,15 @@ namespace sseadv
         private string PickSceneFile(string gameDataPath)
         {
             AssetsFileInstance inst = am.LoadAssetsFile(Path.Combine(gameDataPath, "globalgamemanagers"), false);
-            am.LoadClassDatabaseFromPackage(inst.file.typeTree.unityVersion);
-            AssetFileInfoEx buildSettings = inst.table.GetAssetInfo(11);
+            am.LoadClassDatabaseFromPackage(inst.file.Metadata.UnityVersion);
+            AssetFileInfo buildSettings = inst.file.GetAssetInfo(11);
 
             List<string> scenes = new List<string>();
-            AssetTypeValueField baseField = am.GetATI(inst.file, buildSettings).GetBaseField();
+            AssetTypeValueField baseField = am.GetBaseField(inst, buildSettings);
             AssetTypeValueField sceneArray = baseField.Get("scenes").Get("Array");
-            for (int i = 0; i < sceneArray.GetValue().AsArray().size; i++)
+            for (int i = 0; i < sceneArray.Value.AsArray.size; i++)
             {
-                scenes.Add(sceneArray[i].GetValue().AsString());
+                scenes.Add(sceneArray[i].Value.AsString);
             }
             sceneselect sel = new sceneselect(scenes);
             sel.ShowDialog();
@@ -286,14 +292,15 @@ namespace sseadv
             FileSpriteData spriteData = new FileSpriteData(collections, animations, animationClips);
 
             string managedPath = Path.Combine(Path.GetDirectoryName(inst.path), "Managed");
+            UpdateMonoGenerator(managedPath);
         
             Dictionary<AssetID, TkSpriteCollection> collectionLookup = new Dictionary<AssetID, TkSpriteCollection>();
             int tk2dSCid = -1;
             int tk2dSAid = -1;
-            foreach (AssetFileInfoEx mbInf in inst.table.GetAssetsOfType(0x72))
+            foreach (AssetFileInfo mbInf in inst.file.GetAssetsOfType(0x72))
             {
                 string scriptName = null;
-                ushort scriptIndex = AssetHelper.GetScriptIndex(inst.file, mbInf);
+                ushort scriptIndex = inst.file.GetScriptIndex(mbInf); // AssetHelper.GetScriptIndex(inst.file, mbInf);
                 if (tk2dSCid != -1 && scriptIndex == tk2dSCid)
                 {
                     scriptName = "tk2dSpriteCollectionData";
@@ -303,11 +310,11 @@ namespace sseadv
                     scriptName = "tk2dSpriteAnimation";
                 }
         
-                if (tk2dSCid == -1 || tk2dSAid == -1) //still looking for script ids
+                if (tk2dSCid == -1 || tk2dSAid == -1 && scriptName == null) //still looking for script ids
                 {
-                    AssetTypeValueField mbBase = am.GetATI(inst.file, mbInf).GetBaseField();
-                    AssetTypeValueField scBase = am.GetExtAsset(inst, mbBase.Get("m_Script")).instance.GetBaseField();
-                    scriptName = scBase.Get("m_Name").GetValue().AsString();
+                    AssetTypeValueField mbBase = am.GetBaseField(inst, mbInf);
+                    AssetTypeValueField scBase = am.GetExtAsset(inst, mbBase.Get("m_Script")).baseField;
+                    scriptName = scBase.Get("m_Name").Value.AsString;
                     if (scriptName == "tk2dSpriteCollectionData")
                         tk2dSCid = scriptIndex;
                     else if (scriptName == "tk2dSpriteAnimation")
@@ -316,50 +323,50 @@ namespace sseadv
                         continue; //nope, nobody cares
                 }
         
-                if (scriptName == null)
+                if (scriptName == null && (scriptName == "tk2dSpriteAnimation" || scriptName == "tk2dSpriteCollectionData"))
                     continue;
-        
-                AssetTypeValueField mbSerialBase = am.GetMonoBaseFieldCached(inst, mbInf, managedPath);
+
+                AssetTypeValueField mbSerialBase = am.GetBaseField(inst, mbInf);
                 if (scriptName == "tk2dSpriteCollectionData")
                 {
-                    AssetTypeValueField textures = mbSerialBase.Get("textures");
+                    AssetTypeValueField textures = mbSerialBase.Get("textures")[0];
         
                     List<AssetExternal> textureExts = new List<AssetExternal>();
                     List<int> textureWidths = new List<int>();
                     List<int> textureHeights = new List<int>();
-                    for (int i = 0; i < textures.childrenCount; i++)
+                    for (int i = 0; i < textures.Children.Count; i++)
                     {
-                        AssetExternal textureExt = am.GetExtAsset(inst, mbSerialBase.Get("textures")[i], true);
-                        if (textureExt.info.curFileSize > 100000)
+                        AssetExternal textureExt = am.GetExtAsset(inst, textures[i], true);
+                        if (textureExt.info.ByteSize > 100000)
                         {
                             //bad news, unity probably stored the entire image into an array which is gonna
                             //take up too much memory when we decode it, so we'll change the data to a byte array
-                            ClassDatabaseType textureType = AssetHelper.FindAssetClassByID(am.classFile, textureExt.info.curFileType);
+                            ClassDatabaseType textureType = am.ClassDatabase.FindAssetClassByID(textureExt.info.TypeId);
                             AssetTypeTemplateField textureTemp = new AssetTypeTemplateField();
-                            textureTemp.FromClassDatabase(am.classFile, textureType, 0);
-                            AssetTypeTemplateField image_data = textureTemp.children[textureTemp.childrenCount - 1];
-                            image_data.valueType = EnumValueTypes.ByteArray; //convert array to bytearray, much better
-                            AssetTypeInstance textureTypeInstance = new AssetTypeInstance(new[] { textureTemp }, inst.file.reader, textureExt.info.absoluteFilePos);
-                            AssetTypeValueField textureBase = textureTypeInstance.GetBaseField();
-                            textureExt.instance = textureTypeInstance;
+                            textureTemp.FromClassDatabase(am.ClassDatabase, textureType);
+                            AssetTypeTemplateField image_data = textureTemp.Children[textureTemp.Children.Count - 1];
+                            image_data.ValueType = AssetValueType.ByteArray; //convert array to bytearray, much better
+                            //AssetTypeInstance textureTypeInstance = new AssetTypeInstance(new[] {  }, inst.file.reader, textureExt.info.absoluteFilePos);
+                            AssetTypeValueField textureBase = textureTemp.MakeValue(inst.file.Reader, textureExt.info.GetAbsoluteByteOffset(inst.file));
+                            textureExt.baseField = textureBase;
                             textureExts.Add(textureExt);
-                            textureWidths.Add(textureBase.Get("m_Width").GetValue().AsInt());
-                            textureHeights.Add(textureBase.Get("m_Height").GetValue().AsInt());
+                            textureWidths.Add(textureBase.Get("m_Width").Value.AsInt);
+                            textureHeights.Add(textureBase.Get("m_Height").Value.AsInt);
                         }
                         else
                         {
-                            textureExt = am.GetExtAsset(inst, mbSerialBase.Get("textures")[i]);
-                            AssetTypeValueField textureBase = textureExt.instance.GetBaseField();
+                            textureExt = am.GetExtAsset(inst, textures[i]);
+                            AssetTypeValueField textureBase = textureExt.baseField;
                             textureExts.Add(textureExt);
-                            textureWidths.Add(textureBase.Get("m_Width").GetValue().AsInt());
-                            textureHeights.Add(textureBase.Get("m_Height").GetValue().AsInt());
+                            textureWidths.Add(textureBase.Get("m_Width").Value.AsInt);
+                            textureHeights.Add(textureBase.Get("m_Height").Value.AsInt);
                         }
                     }
         
                     TkSpriteCollection collection = new TkSpriteCollection()
                     {
-                        name = mbSerialBase.Get("spriteCollectionName").GetValue().AsString(),
-                        version = mbSerialBase.Get("version").GetValue().AsInt(),
+                        name = mbSerialBase.Get("spriteCollectionName").Value.AsString,
+                        version = mbSerialBase.Get("version").Value.AsInt,
                         baseTexture = null, //do later
                         textures = new Dictionary<int, Bitmap>(), //same
                         textureExts = textureExts,
@@ -368,12 +375,12 @@ namespace sseadv
                         sprites = new List<TkSpriteDefinition>(),
                         baseFile = spriteData
                     };
-                    collectionLookup[new AssetID(inst.name, mbInf.index)] = collection;
-                    AssetTypeValueField spriteDefinitions = mbSerialBase.Get("spriteDefinitions");
-                    foreach (AssetTypeValueField def in spriteDefinitions.children)
+                    collectionLookup[new AssetID(inst.name, mbInf.PathId)] = collection;
+                    AssetTypeValueField spriteDefinitions = mbSerialBase.Get("spriteDefinitions")[0];
+                    foreach (AssetTypeValueField def in spriteDefinitions.Children)
                     {
-                        bool flipped = def.Get("flipped").GetValue().AsInt() == 1;
-                        int materialId = def.Get("materialId").GetValue().AsInt();
+                        bool flipped = def.Get("flipped").Value.AsInt == 1;
+                        int materialId = def.Get("materialId").Value.AsInt;
                         int textureWidth = textureWidths[materialId];
                         int textureHeight = textureHeights[materialId];
         
@@ -383,16 +390,16 @@ namespace sseadv
                         double uyp = 0;
                         double pxn = double.MaxValue;
                         double pyn = double.MaxValue;
-                        AssetTypeValueField positions = def.Get("positions");
-                        AssetTypeValueField uvs = def.Get("uvs");
+                        AssetTypeValueField positions = def.Get("positions")[0];
+                        AssetTypeValueField uvs = def.Get("uvs")[0];
                         for (int i = 0; i < 4; i++)
                         {
                             AssetTypeValueField pos = positions[i];
                             AssetTypeValueField uv = uvs[i];
-                            double posX = pos.Get("x").GetValue().AsFloat();
-                            double posY = pos.Get("y").GetValue().AsFloat();
-                            double uvX = Math.Round(uv.Get("x").GetValue().AsFloat() * textureWidth);
-                            double uvY = textureHeight - Math.Round(uv.Get("y").GetValue().AsFloat() * textureHeight);
+                            double posX = pos.Get("x").Value.AsFloat;
+                            double posY = pos.Get("y").Value.AsFloat;
+                            double uvX = Math.Round(uv.Get("x").Value.AsFloat * textureWidth);
+                            double uvY = textureHeight - Math.Round(uv.Get("y").Value.AsFloat * textureHeight);
                             if (posX < pxn)
                                 pxn = posX;
                             if (posY < pyn)
@@ -413,14 +420,14 @@ namespace sseadv
                         int spriteHeight = (int)(uyp - uyn);
         
                         AssetTypeValueField boundsData = def.Get("boundsData");
-                        AssetTypeValueField untrimmedBoundsData = def.Get("untrimmedBoundsData");
+                        AssetTypeValueField untrimmedBoundsData = def.Get("untrimmedBoundsData")[0];
                         AssetTypeValueField texelSize = def.Get("texelSize");
         
-                        float untrimmedBoundsDataX = untrimmedBoundsData[0].Get("x").GetValue().AsFloat();
-                        float untrimmedBoundsDataY = untrimmedBoundsData[0].Get("y").GetValue().AsFloat();
+                        float untrimmedBoundsDataX = untrimmedBoundsData[0].Get("x").Value.AsFloat;
+                        float untrimmedBoundsDataY = untrimmedBoundsData[0].Get("y").Value.AsFloat;
         
-                        float texelX = texelSize.Get("x").GetValue().AsFloat();
-                        float texelY = texelSize.Get("y").GetValue().AsFloat();
+                        float texelX = texelSize.Get("x").Value.AsFloat;
+                        float texelY = texelSize.Get("y").Value.AsFloat;
         
                         float realX = ((float)pxn) / texelX;
                         float realY = -((flipped ? spriteWidth : spriteHeight) + ((float)pyn) / texelY);
@@ -431,7 +438,7 @@ namespace sseadv
                         TkSpriteDefinition sprite = new TkSpriteDefinition()
                         {
                             parent = collection,
-                            name = def.Get("name").GetValue().AsString(),
+                            name = def.Get("name").Value.AsString,
                             x = spriteX,
                             y = spriteY,
                             width = spriteWidth,
@@ -439,8 +446,8 @@ namespace sseadv
                             xOff = realX,
                             yOff = realY,
                             materialId = materialId,
-                            fullWidth = untrimmedBoundsData[1].Get("x").GetValue().AsFloat() / texelX,
-                            fullHeight = untrimmedBoundsData[1].Get("y").GetValue().AsFloat() / texelY,
+                            fullWidth = untrimmedBoundsData[1].Get("x").Value.AsFloat / texelX,
+                            fullHeight = untrimmedBoundsData[1].Get("y").Value.AsFloat / texelY,
                             flipped = flipped
                         };
                         collection.sprites.Add(sprite);
@@ -449,35 +456,35 @@ namespace sseadv
                 }
                 else if (scriptName == "tk2dSpriteAnimation")
                 {
-                    AssetFileInfoEx gameObjectInfo = inst.table.GetAssetInfo(mbSerialBase.Get("m_GameObject").Get("m_PathID").GetValue().AsInt64());
+                    AssetFileInfo gameObjectInfo = inst.file.GetAssetInfo(mbSerialBase.Get("m_GameObject").Get("m_PathID").Value.AsLong);
                     TkSpriteAnimation animation = new TkSpriteAnimation()
                     {
                         parents = new List<TkSpriteCollection>(), //do later
                         parentIds = new List<AssetID>(),
-                        gameObjectName = AssetHelper.GetAssetNameFast(inst.file, am.classFile, gameObjectInfo),
+                        gameObjectName = AssetHelper.GetAssetNameFast(inst.file, am.ClassDatabase, gameObjectInfo),
                         clips = new List<TkSpriteAnimationClip>()
                     };
         
-                    AssetTypeValueField clips = mbSerialBase.Get("clips");
-                    foreach (AssetTypeValueField clip in clips.children)
+                    AssetTypeValueField clips = mbSerialBase.Get("clips")[0];
+                    foreach (AssetTypeValueField clip in clips.Children)
                     {
                         TkSpriteAnimationClip aniClip = new TkSpriteAnimationClip()
                         {
                             parent = animation,
-                            name = clip.Get("name").GetValue().AsString(),
-                            fps = clip.Get("fps").GetValue().AsFloat(),
-                            loopStart = clip.Get("loopStart").GetValue().AsInt(),
-                            wrapMode = (WrapMode)clip.Get("wrapMode").GetValue().AsInt(),
+                            name = clip.Get("name").Value.AsString,
+                            fps = clip.Get("fps").Value.AsFloat,
+                            loopStart = clip.Get("loopStart").Value.AsInt,
+                            wrapMode = (WrapMode)clip.Get("wrapMode").Value.AsInt,
                             frames = new List<TkSpriteFrame>()
                         };
                         animation.clips.Add(aniClip);
                         animationClips.Add(aniClip);
         
-                        AssetTypeValueField frames = clip.Get("frames");
-                        foreach (AssetTypeValueField frame in frames.children)
+                        AssetTypeValueField frames = clip.Get("frames")[0];
+                        foreach (AssetTypeValueField frame in frames.Children)
                         {
                             AssetExternal collectionExt = am.GetExtAsset(inst, frame.Get("spriteCollection"));
-                            AssetID collectionId = new AssetID(collectionExt.file.name, collectionExt.info.index);
+                            AssetID collectionId = new AssetID(collectionExt.file.name, collectionExt.info.PathId);
                             if (!animation.parentIds.Contains(collectionId))
                             {
                                 animation.parentIds.Add(collectionId);
@@ -486,7 +493,7 @@ namespace sseadv
                             {
                                 collection = null, //do later
                                 collectionId = collectionId,
-                                spriteId = frame.Get("spriteId").GetValue().AsInt()
+                                spriteId = frame.Get("spriteId").Value.AsInt
                             };
                             sprFrames.Add(sprFrame);
                             aniClip.frames.Add(sprFrame);
@@ -527,54 +534,61 @@ namespace sseadv
         
             if (saveFolder != string.Empty)
             {
-                exportoptions options = new exportoptions(activeCollection.name);
+                exportoptions options = new exportoptions(activeCollection.name, false);
                 options.ShowDialog();
         
                 if (options.DialogOk)
                 {
-                    int counter = 0;
-                    List<TkSpriteDefinition> sortedSpriteList = activeCollection.sprites.OrderBy(s => s.name).ToList();
-                    List<string> infoLines = new List<string>();
-                    infoLines.Add("version: 2");
-                    infoLines.Add("type: collection");
-                    infoLines.Add("name: " + activeCollection.name);
-                    infoLines.Add("consistent_sprite_size: " + (options.ConsistentSpriteSize ? "true" : "false"));
-                    infoLines.Add("enable_borders: " + (options.EnableBorders ? "true" : "false"));
-                    infoLines.Add("use_sprite_name: " + (options.UseSpriteName ? "true" : "false"));
-                    infoLines.Add("sprites: " + sortedSpriteList.Count);
-                    foreach (TkSpriteDefinition sprite in sortedSpriteList)
+                    if (options.ExportOriginal)
                     {
-                        string spriteName = sprite.name;
-                        string fileName;
-                        if (options.UseSpriteName)
+                        int counter = 0;
+                        List<TkSpriteDefinition> sortedSpriteList = activeCollection.sprites.OrderBy(s => s.name).ToList();
+                        List<string> infoLines = new List<string>();
+                        infoLines.Add("version: 2");
+                        infoLines.Add("type: collection");
+                        infoLines.Add("name: " + activeCollection.name);
+                        infoLines.Add("consistent_sprite_size: " + (options.ConsistentSpriteSize ? "true" : "false"));
+                        infoLines.Add("enable_borders: " + (options.EnableBorders ? "true" : "false"));
+                        infoLines.Add("use_sprite_name: " + (options.UseSpriteName ? "true" : "false"));
+                        infoLines.Add("sprites: " + sortedSpriteList.Count);
+                        foreach (TkSpriteDefinition sprite in sortedSpriteList)
                         {
-                            if (sprite.name != "")
-                                fileName = $"{activeCollection.name}_{sprite.name}.png";
+                            string spriteName = sprite.name;
+                            string fileName;
+                            if (options.UseSpriteName)
+                            {
+                                if (sprite.name != "")
+                                    fileName = $"{activeCollection.name}_{sprite.name}.png";
+                                else
+                                    fileName = $"{activeCollection.name}_unnamed_{counter}.png";
+                            }
                             else
-                                fileName = $"{activeCollection.name}_unnamed_{counter}.png";
-                        }
-                        else
-                        {
-                            fileName = $"{activeCollection.name}_{counter.ToString().PadLeft(3, '0')}.png";
-                        }
-                        infoLines.Add(spriteName + "\t" + fileName);
+                            {
+                                fileName = $"{activeCollection.name}_{counter.ToString().PadLeft(3, '0')}.png";
+                            }
+                            infoLines.Add(spriteName + "\t" + fileName);
 
-                        Bitmap croppedImage = GetCroppedSprite(sprite, false, true, options.EnableBorders, options.ConsistentSpriteSize);
-                        croppedImage.Save(Path.Combine(saveFolder, fileName));
-                        counter++;
+                            Bitmap croppedImage = GetCroppedSprite(sprite, false, true, options.EnableBorders, options.ConsistentSpriteSize);
+                            croppedImage.Save(Path.Combine(saveFolder, fileName));
+                            counter++;
+                        }
+
+                        TkSpriteCollection col = activeCollection;
+                        for (int i = 0; i < col.textureExts.Count; i++)
+                        {
+                            if (!col.textures.ContainsKey(i) || col.textures[i] == null)
+                            {
+                                col.textures[i] = GetTexture(col.textureExts[i]);
+                            }
+                            col.textures[i].Save(Path.Combine(saveFolder, $"{col.name}_full_{i}.png"));
+                        }
+
+                        File.WriteAllLines(Path.Combine(saveFolder, activeCollection.name + "_aaaaa_info.txt"), infoLines.ToArray());
                     }
 
-                    TkSpriteCollection col = activeCollection;
-                    for (int i = 0; i < col.textureExts.Count; i++)
-                    {
-                        if (!col.textures.ContainsKey(i) || col.textures[i] == null)
-                        {
-                            col.textures[i] = GetTexture(col.textureExts[i]);
-                        }
-                        col.textures[i].Save(Path.Combine(saveFolder, $"{col.name}_full_{i}.png"));
-                    }
-
-                    File.WriteAllLines(Path.Combine(saveFolder, activeCollection.name + "_aaaaa_info.txt"), infoLines.ToArray());
+                    if (options.CustomSpriteSheet)
+                        exportAsCustomSpriteSheet(saveFolder, activeCollection, options);
+                    //    exportAsCustomSpriteSheet(saveFolder, sortedSpriteList, options.SheetColumns, options.SheetRows, activeCollection.name);
                 }
             }
         }
@@ -588,51 +602,217 @@ namespace sseadv
         
             if (saveFolder != string.Empty)
             {
-                exportoptions options = new exportoptions(activeAnimation.name);
+                exportoptions options = new exportoptions(activeAnimation.name, true);
                 options.ShowDialog();
         
                 if (options.DialogOk)
                 {
-                    int counter = 0;
-                    List<string> infoLines = new List<string>();
-                    infoLines.Add("version: 2");
-                    infoLines.Add("type: animation");
-                    infoLines.Add("name: " + activeAnimation.name);
-                    infoLines.Add("consistent_sprite_size: " + (options.ConsistentSpriteSize ? "true" : "false"));
-                    infoLines.Add("enable_borders: " + (options.EnableBorders ? "true" : "false"));
-                    infoLines.Add("use_sprite_name: " + (options.UseSpriteName ? "true" : "false"));
-                    infoLines.Add("sprites: " + activeAnimation.frames.Count);
-                    foreach (TkSpriteFrame frame in activeAnimation.frames)
+                    if (options.ExportOriginal)
                     {
-                        string spriteName = frame.collection.sprites[frame.spriteId].name;
-                        string fileName;
-                        if (options.UseSpriteName)
+                        int counter = 0;
+                        List<string> infoLines = new List<string>();
+                        infoLines.Add("version: 2");
+                        infoLines.Add("type: animation");
+                        infoLines.Add("name: " + activeAnimation.name);
+                        infoLines.Add("consistent_sprite_size: " + (options.ConsistentSpriteSize ? "true" : "false"));
+                        infoLines.Add("enable_borders: " + (options.EnableBorders ? "true" : "false"));
+                        infoLines.Add("use_sprite_name: " + (options.UseSpriteName ? "true" : "false"));
+                        infoLines.Add("sprites: " + activeAnimation.frames.Count);
+                        foreach (TkSpriteFrame frame in activeAnimation.frames)
                         {
-                            fileName = $"{activeAnimation.name}_{spriteName}_{counter.ToString().PadLeft(3, '0')}.png";
-                        }
-                        else
-                        {
-                            fileName = $"{activeAnimation.name}_{counter.ToString().PadLeft(3, '0')}.png";
-                        }
-                        infoLines.Add(counter + "\t" + fileName);
+                            string spriteName = frame.collection.sprites[frame.spriteId].name;
+                            string fileName;
+                            if (options.UseSpriteName)
+                            {
+                                fileName = $"{activeAnimation.name}_{spriteName}_{counter.ToString().PadLeft(3, '0')}.png";
+                            }
+                            else
+                            {
+                                fileName = $"{activeAnimation.name}_{counter.ToString().PadLeft(3, '0')}.png";
+                            }
+                            infoLines.Add(counter + "\t" + fileName);
 
-                        Bitmap croppedImage = GetCroppedSprite(frame.collection.sprites[frame.spriteId], false, true, options.EnableBorders, options.ConsistentSpriteSize);
-                        croppedImage.Save(Path.Combine(saveFolder, fileName));
-                        counter++;
+                            Bitmap croppedImage = GetCroppedSprite(frame.collection.sprites[frame.spriteId], false, true, options.EnableBorders, options.ConsistentSpriteSize);
+                            croppedImage.Save(Path.Combine(saveFolder, fileName));
+                            counter++;
+                        }
+
+                        TkSpriteCollection col = activeCollection;
+                        for (int i = 0; i < col.textureExts.Count; i++)
+                        {
+                            if (!col.textures.ContainsKey(i) || col.textures[i] == null)
+                            {
+                                col.textures[i] = GetTexture(col.textureExts[i]);
+                            }
+                            col.textures[i].Save(Path.Combine(saveFolder, $"{col.name}_full_{i}.png"));
+                        }
+
+                        File.WriteAllLines(Path.Combine(saveFolder, activeCollection.name + "_aaaaa_info.txt"), infoLines.ToArray());
                     }
 
-                    TkSpriteCollection col = activeCollection;
-                    for (int i = 0; i < col.textureExts.Count; i++)
-                    {
-                        if (!col.textures.ContainsKey(i) || col.textures[i] == null)
-                        {
-                            col.textures[i] = GetTexture(col.textureExts[i]);
-                        }
-                        col.textures[i].Save(Path.Combine(saveFolder, $"{col.name}_full_{i}.png"));
-                    }
-
-                    File.WriteAllLines(Path.Combine(saveFolder, activeCollection.name + "_aaaaa_info.txt"), infoLines.ToArray());
+                    if (options.CustomSpriteSheet)
+                        exportAsCustomSpriteSheet(saveFolder, activeAnimation, options);
                 }
+            }
+        }
+
+        private void exportAsCustomSpriteSheet(string saveFolder, TkSpriteCollection collection, exportoptions options)
+        {
+            Dictionary<string, List<TkSpriteDefinition>> defs = new Dictionary<string, List<TkSpriteDefinition>>();
+            if (options.ExportSeparate && options.SheetAmt > 0)
+            {
+                int i = 0;
+                List<TkSpriteDefinition> cur = null;
+                while (i < collection.sprites.Count)
+                {
+                    if (cur == null)
+                        cur = new List<TkSpriteDefinition>();
+                    cur.Add(collection.sprites[i]);
+                    if (cur.Count >= options.SheetAmt)
+                    {
+                        defs.Add(defs.Count.ToString(), cur);
+                        cur = null;
+                    }
+                    i++;
+                }
+                if (cur != null)
+                    defs.Add(defs.Count.ToString(), cur);
+            }
+            else
+            {
+                defs.Add("0", collection.sprites);
+            }
+            exportAsCustomSpriteSheet(saveFolder, defs, options.SheetColumns, options.SheetRows, collection.name, options.GenerateSimpleJSON);
+        }
+
+        private void exportAsCustomSpriteSheet(string saveFolder, TkSpriteAnimationClip clip, exportoptions options)
+        {
+            Dictionary<string, List<TkSpriteDefinition>> defs = new Dictionary<string, List<TkSpriteDefinition>>();
+            string name = clip.name;
+            if (options.ExportSeparate && ((options.AnimFullExport && options.AnimSplitByAnim) || options.SheetAmt > 0))
+            {
+                if ((!options.AnimFullExport || !options.AnimSplitByAnim) && options.SheetAmt > 0)
+                {
+                    int i = 0;
+                    List<TkSpriteDefinition> cur = null;
+                    while (i < clip.frames.Count)
+                    {
+                        if (cur == null)
+                            cur = new List<TkSpriteDefinition>();
+                        cur.Add(clip.frames[i].collection.sprites[clip.frames[i].spriteId]);
+                        if (cur.Count >= options.SheetAmt)
+                        {
+                            defs.Add(defs.Count.ToString(), cur);
+                            cur = null;
+                        }
+                        i++;
+                    }
+                    if (cur != null)
+                        defs.Add(defs.Count.ToString(), cur);
+                }
+                else
+                {
+                    foreach (TkSpriteAnimationClip clip2 in clip.parent.clips)
+                    {
+                        string clipName = clip2.name;
+                        if (defs.ContainsKey(clipName))
+                        {
+                            int cloneNum = 2;
+                            clipName = $"{clip2.name} ({cloneNum})";
+                            while (defs.ContainsKey(clipName))
+                            {
+                                cloneNum++;
+                                clipName = $"{clip2.name} ({cloneNum})";
+                            }
+                        }
+                        defs.Add(clipName, clip2.frames.Select(frame => frame.collection.sprites[frame.spriteId]).ToList());
+                        if (options.GenerateSimpleJSON)
+                        {
+                            File.WriteAllText(Path.Combine(saveFolder, $"{clipName}-{CKSAAJson.AnimInfo.FileName}"), Newtonsoft.Json.JsonConvert.SerializeObject(
+                                new CKSAAJson.AnimInfo() {useOriginalData = true, LoopType = clip2.wrapMode, loopStart = clip2.loopStart, fps = clip2.fps, InfoType = CKSAAJson.DefType.Simple}, Newtonsoft.Json.Formatting.Indented));
+                        }
+                    }
+                    name = clip.parent.gameObjectName;
+                }
+            }
+            else
+            {
+                if (options.AnimFullExport)
+                {
+                    defs.Add("0", clip.parent.clips.SelectMany(clip2 => clip2.frames.Select(frame => frame.collection.sprites[frame.spriteId])).ToList());
+                    name = clip.parent.gameObjectName;
+                }
+                else
+                {
+                    defs.Add("0", clip.frames.Select(frame => frame.collection.sprites[frame.spriteId]).ToList());
+                    if (options.GenerateSimpleJSON)
+                    {
+                        File.WriteAllText(Path.Combine(saveFolder, $"{clip.name}-{CKSAAJson.AnimInfo.FileName}"), Newtonsoft.Json.JsonConvert.SerializeObject(
+                            new CKSAAJson.AnimInfo() {useOriginalData = true, LoopType = clip.wrapMode, loopStart = clip.loopStart, fps = clip.fps, InfoType = CKSAAJson.DefType.Simple}, Newtonsoft.Json.Formatting.Indented));
+                    }
+                }
+            }
+            exportAsCustomSpriteSheet(saveFolder, defs, options.SheetColumns, options.SheetRows, name, options.GenerateSimpleJSON);
+        }
+
+        private void exportAsCustomSpriteSheet(string saveFolder, Dictionary<string, List<TkSpriteDefinition>> defs, int columns, int rows, string name, bool json)
+        {
+            if (defs.Count == 1)
+            {
+                exportAsCustomSpriteSheet(saveFolder, defs.First().Value, columns, rows, name, json);
+                return;
+            }
+            foreach (var sprites in defs)
+            {
+                exportAsCustomSpriteSheet(saveFolder, sprites.Value, columns, rows, name + "-" + sprites.Key, json);
+            }
+        }
+
+        private void exportAsCustomSpriteSheet(string saveFolder, List<TkSpriteDefinition> defs, int columns, int rows, string name, bool json)
+        {
+            if (defs.Count <= 0)
+                return;
+            if (columns <= 0 && rows <= 0)
+            {
+                double rt = Math.Sqrt(defs.Count);
+                columns = (int)Math.Ceiling(rt);
+                rows = (int)Math.Floor(rt);
+            }
+            else if (columns <= 0)
+                columns = (int)Math.Ceiling((double)defs.Count / (double)rows);
+            else if (rows <= 0)
+                rows = (int)Math.Ceiling((double)defs.Count / (double)columns);
+            if (columns * rows < defs.Count)
+                rows = (int)Math.Ceiling((double)defs.Count / (double)columns);
+            float maxWidth = defs.Select(def => def.fullWidth).Max();
+            float maxHeight = defs.Select(def => def.fullHeight).Max();
+            int maxWidthInt = (int)Math.Round(maxWidth);
+            int maxHeightInt = (int)Math.Round(maxHeight);
+            int width = (int)Math.Ceiling(maxWidth * columns);
+            int height = (int)Math.Ceiling(maxHeight * rows);
+        
+            Bitmap bitmap = new Bitmap(width, height);
+        
+            using (Graphics graphics = Graphics.FromImage(bitmap))
+            {
+                for (int y = 0; y < rows; y++)
+                {
+                    for (int x = 0; x < columns; x++)
+                    {
+                        if (defs.Count <= (y * columns) + x)
+                            break;
+                        Bitmap croppedImage = GetCroppedSprite(defs[(y * columns) + x], false, true, false, true);
+                        int offsetX = (maxWidthInt - croppedImage.Width) / 2;
+                        int offsetY = (maxHeightInt - croppedImage.Height) / 2;
+                        graphics.DrawImage(croppedImage, new Rectangle((x * maxWidthInt) + offsetX, (y * maxHeightInt) + offsetY, croppedImage.Width, croppedImage.Height), new Rectangle(0, 0, croppedImage.Width, croppedImage.Height), GraphicsUnit.Pixel);
+                    }
+                }
+            }
+            bitmap.Save(Path.Combine(saveFolder, $"{name}-CustomSheet-{defs.Count}.png"));
+            if (json)
+            {
+                File.WriteAllText(Path.Combine(saveFolder, $"{name}-{CKSAAJson.SimpleInfo.FileName}"), Newtonsoft.Json.JsonConvert.SerializeObject(
+                    new CKSAAJson.SimpleInfo() {columns = columns, rows = rows, frames = defs.Count, anchor = new CKSAAJson.Vector2(maxWidth / 2f, maxHeight / 2f)}, Newtonsoft.Json.Formatting.Indented));
             }
         }
 
@@ -1044,6 +1224,7 @@ namespace sseadv
                 string dirName = Path.GetDirectoryName(ofd.FileName);
                 if (Directory.Exists(dirName))
                 {
+                    UpdateMonoGenerator(dirName);
                     return dirName;
                 }
                 else
@@ -1054,13 +1235,25 @@ namespace sseadv
             return string.Empty;
         }
 
+        private void UpdateMonoGenerator(string path)
+        {
+            if (monoGenerators.TryGetValue(path, out MonoCecilTempGenerator generator))
+                am.MonoTempGenerator = generator;
+            else
+            {
+                MonoCecilTempGenerator generator2 = new MonoCecilTempGenerator(path);
+                am.MonoTempGenerator = generator2;
+                monoGenerators.Add(path, generator2);
+            }
+        }
+
         private Bitmap GetTexture(AssetExternal textureExt)
         {
-            if (textureExt.instance == null)
+            if (textureExt.baseField == null)
                 return null;
         
-            AssetTypeValueField textureBase = textureExt.instance.GetBaseField();
-            AssetID id = new AssetID(textureExt.file.name, textureExt.info.index);
+            AssetTypeValueField textureBase = textureExt.baseField;
+            AssetID id = new AssetID(textureExt.file.name, textureExt.info.PathId);
             if (bitmapCache.ContainsKey(id))
                 return bitmapCache[id];
         
